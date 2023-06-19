@@ -1,5 +1,27 @@
 #!/bin/bash
 
+verbose=false
+execute=true
+
+if [[ $# -lt 4 ]]; then
+  echo "Insufficient arguments. Usage: $0 <submission_folder> <target_folder> <test_folder> <answer_folder>"
+  exit 1
+fi
+
+
+# Check if the fifth argument exists
+if [ $# -ge 5 ]; then
+    if [ $5 == -v ]
+    then
+        verbose=true
+    fi
+
+    if [ $# -ge 6 ] && [ "$6" == "-nonexecute" ]; then
+        execute=false
+    fi
+fi
+
+
 organize_code_files() {
     local submissions_dir="$1"
     local targets_dir="$2"
@@ -12,6 +34,10 @@ organize_code_files() {
         mainFile=$(basename "$zipfile")
         studentID="${mainFile##*_}"
         studentID="${studentID%%.*}"
+
+        if $verbose; then
+            echo "organizing code for $studentID"
+        fi
 
         unzip -j "$zipfile" *.{c,java,py} -d temp >/dev/null 2>&1
 
@@ -42,6 +68,10 @@ compile_and_test() {
         for student_dir in "$targets_dir/$lang"/*; do
             studentID=$(basename "$student_dir")
 
+            if $verbose; then
+            echo "executing code for $studentID"
+            fi
+
             if [ "$lang" = "C" ]; then
                 gcc "$student_dir/main.c" -o "$student_dir/main.out" >/dev/null 2>&1
                 binary="$student_dir/main.out"
@@ -52,11 +82,11 @@ compile_and_test() {
                 binary="python3 $student_dir/main.py"
             fi
 
-            match_count=0
-            not_match_count=0
-            total_tests=$(ls -1q "$tests_dir"/*.txt | wc -l)
+            matchCount=0
+            notMatchCount=0
+            totalTest=$(ls -1q "$tests_dir"/*.txt | wc -l)
 
-            for ((i=1; i<=total_tests; i++)); do
+            for ((i=1; i<=totalTest; i++)); do
                 testfile="$tests_dir/test$i.txt"
                 outfilename="out$i.txt"
 
@@ -65,13 +95,13 @@ compile_and_test() {
                 answerfile="$answers_dir/ans$i.txt"
 
                 if diff -q "$student_dir/$outfilename" "$answerfile" >/dev/null 2>&1; then
-                    ((match_count++))
+                    ((matchCount++))
                 else
-                    ((not_match_count++))
+                    ((notMatchCount++))
                 fi
             done
 
-            echo "$studentID,$lang,$match_count,$not_match_count" >> "$results_file"
+            echo "$studentID,$lang,$matchCount,$notMatchCount" >> "$results_file"
         done
     done
 }
@@ -84,4 +114,7 @@ answers_dir="$4"
 
 organize_code_files "$submissions_dir" "$targets_dir"
 results_file="$targets_dir/result.csv"
-compile_and_test "$targets_dir" "$tests_dir" "$answers_dir" "$results_file"
+
+if $execute; then
+    compile_and_test "$targets_dir" "$tests_dir" "$answers_dir" "$results_file"
+fi
