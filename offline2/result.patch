@@ -1,0 +1,531 @@
+Binary files a/.DS_Store and b/.DS_Store differ
+diff --color -u -urN a/Makefile b/Makefile
+--- a/Makefile	2023-07-03 21:05:13
++++ b/Makefile	2023-07-04 00:49:08
+@@ -132,7 +132,8 @@
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
+-
++	$U/_trace\
++	
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+ 
+diff --color -u -urN a/kernel/defs.h b/kernel/defs.h
+--- a/kernel/defs.h	2023-07-03 21:05:13
++++ b/kernel/defs.h	2023-07-04 00:54:15
+@@ -63,12 +63,14 @@
+ void*           kalloc(void);
+ void            kfree(void *);
+ void            kinit(void);
++int             free_mem(void);
+ 
+ // log.c
+ void            initlog(int, struct superblock*);
+ void            log_write(struct buf*);
+ void            begin_op(void);
+ void            end_op(void);
++int             trace(int);
+ 
+ // pipe.c
+ int             pipealloc(struct file**, struct file**);
+@@ -106,6 +108,7 @@
+ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
+ void            procdump(void);
++int             n_proc(void);
+ 
+ // swtch.S
+ void            swtch(struct context*, struct context*);
+diff --color -u -urN a/kernel/kalloc.c b/kernel/kalloc.c
+--- a/kernel/kalloc.c	2023-07-03 21:05:13
++++ b/kernel/kalloc.c	2023-07-04 01:00:34
+@@ -80,3 +80,18 @@
+     memset((char*)r, 5, PGSIZE); // fill with junk
+   return (void*)r;
+ }
++
++int
++free_mem(void)
++{
++  struct run *r;
++  int free_page=0;
++
++  acquire(&kmem.lock);
++  for(r=kmem.freelist;r;r=r->next){
++    free_page++;
++  }
++  release(&kmem.lock);
++
++  return free_page*4096; //as size of each page is 4096 bytes
++}
+diff --color -u -urN a/kernel/proc.c b/kernel/proc.c
+--- a/kernel/proc.c	2023-07-03 21:05:13
++++ b/kernel/proc.c	2023-07-04 01:12:35
+@@ -168,6 +168,7 @@
+   p->chan = 0;
+   p->killed = 0;
+   p->xstate = 0;
++  p->trace_id=-1;
+   p->state = UNUSED;
+ }
+ 
+@@ -602,6 +603,36 @@
+   }
+   return -1;
+ }
++
++int
++trace(int pid)
++{
++  if(pid<0){
++    return -1;
++  }
++  struct proc *p=myproc();
++  acquire(&p->lock);
++  p->trace_id=pid;
++  release(&p->lock);
++  return 0;
++}
++
++int 
++n_proc(void)
++{
++  struct proc *p;
++  int n=0;
++
++  for(p=proc;p<&proc[NPROC];p++){
++    acquire(&p->lock);
++    if(p->state!=UNUSED){
++      n++;
++    }
++    release(&p->lock);
++  }
++  return n;
++}
++
+ 
+ void
+ setkilled(struct proc *p)
+diff --color -u -urN a/kernel/proc.h b/kernel/proc.h
+--- a/kernel/proc.h	2023-07-03 21:05:13
++++ b/kernel/proc.h	2023-07-04 01:19:46
+@@ -91,7 +91,7 @@
+   int killed;                  // If non-zero, have been killed
+   int xstate;                  // Exit status to be returned to parent's wait
+   int pid;                     // Process ID
+-
++  int trace_id;                //Trace ID
+   // wait_lock must be held when using this:
+   struct proc *parent;         // Parent process
+ 
+diff --color -u -urN a/kernel/syscall.c b/kernel/syscall.c
+--- a/kernel/syscall.c	2023-07-03 21:05:13
++++ b/kernel/syscall.c	2023-07-04 21:40:11
+@@ -101,6 +101,7 @@
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_trace(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,8 +127,34 @@
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_trace]   sys_trace,
+ };
+ 
++char *syscallnames[] = {
++[SYS_fork]    "fork",
++[SYS_exit]    "exit",
++[SYS_wait]    "wait",
++[SYS_pipe]    "pipe",
++[SYS_read]    "read",
++[SYS_kill]    "kill",
++[SYS_exec]    "exec",
++[SYS_fstat]   "fstat",
++[SYS_chdir]   "chdir",
++[SYS_dup]     "dup",
++[SYS_getpid]  "getpid",
++[SYS_sbrk]    "sbrk",
++[SYS_sleep]   "sleep",
++[SYS_uptime]  "uptime",
++[SYS_open]    "open",
++[SYS_write]   "write",
++[SYS_mknod]   "mknod",
++[SYS_unlink]  "unlink",
++[SYS_link]    "link",
++[SYS_mkdir]   "mkdir",
++[SYS_close]   "close",
++[SYS_trace]   "trace",
++ };
++
+ void
+ syscall(void)
+ {
+@@ -138,7 +165,16 @@
+   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+     // Use num to lookup the system call function for num, call it,
+     // and store its return value in p->trapframe->a0
++    if(num==p->trace_id){
++      printf("pid: %d, syscall: %s,", p->pid, syscallnames[num]);
++    }
++
+     p->trapframe->a0 = syscalls[num]();
++
++    if(num==p->trace_id){
++      printf("return: %d\n",p->trapframe->a0);
++    }
++    
+   } else {
+     printf("%d %s: unknown sys call %d\n",
+             p->pid, p->name, num);
+diff --color -u -urN a/kernel/syscall.h b/kernel/syscall.h
+--- a/kernel/syscall.h	2023-07-03 21:05:13
++++ b/kernel/syscall.h	2023-07-04 06:06:01
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_trace  22
+diff --color -u -urN a/kernel/sysfile.c b/kernel/sysfile.c
+--- a/kernel/sysfile.c	2023-07-03 21:05:13
++++ b/kernel/sysfile.c	2023-07-04 20:33:23
+@@ -15,6 +15,7 @@
+ #include "sleeplock.h"
+ #include "file.h"
+ #include "fcntl.h"
++#include "syscall.h"
+ 
+ // Fetch the nth word-sized system call argument as a file descriptor
+ // and return both the descriptor and the corresponding struct file.
+@@ -57,6 +58,12 @@
+   struct file *f;
+   int fd;
+ 
++  int ar;
++  argint(0,&ar);
++  if(myproc()->trace_id==SYS_dup){
++    printf("args:(%d), ",ar);
++  }
++
+   if(argfd(0, 0, &f) < 0)
+     return -1;
+   if((fd=fdalloc(f)) < 0)
+@@ -74,6 +81,13 @@
+ 
+   argaddr(1, &p);
+   argint(2, &n);
++
++  int ar;
++  argint(0,&ar);
++  if(myproc()->trace_id==SYS_read){
++    printf("args:(%d, %p, %d), ",ar,p,n);
++  }
++
+   if(argfd(0, 0, &f) < 0)
+     return -1;
+   return fileread(f, p, n);
+@@ -88,6 +102,13 @@
+   
+   argaddr(1, &p);
+   argint(2, &n);
++
++  int ar;
++  argint(0,&ar);
++  if(myproc()->trace_id==SYS_write){
++    printf("args:(%d, %p, %d), ",ar,p,n);
++  }
++
+   if(argfd(0, 0, &f) < 0)
+     return -1;
+ 
+@@ -100,6 +121,12 @@
+   int fd;
+   struct file *f;
+ 
++  int ar;
++  argint(0,&ar);
++  if(myproc()->trace_id==SYS_close){
++    printf("args:(%d), ",ar);
++  }
++
+   if(argfd(0, &fd, &f) < 0)
+     return -1;
+   myproc()->ofile[fd] = 0;
+@@ -114,6 +141,13 @@
+   uint64 st; // user pointer to struct stat
+ 
+   argaddr(1, &st);
++
++  int ar;
++  argint(0,&ar);
++  if(myproc()->trace_id==SYS_fstat){
++    printf("args:(%d, %p), ",ar,st);
++  }
++
+   if(argfd(0, 0, &f) < 0)
+     return -1;
+   return filestat(f, st);
+@@ -129,6 +163,10 @@
+   if(argstr(0, old, MAXPATH) < 0 || argstr(1, new, MAXPATH) < 0)
+     return -1;
+ 
++  if(myproc()->trace_id==SYS_link){
++    printf("args:(%s, %s), ",old,new);
++  }
++
+   begin_op();
+   if((ip = namei(old)) == 0){
+     end_op();
+@@ -196,6 +234,10 @@
+   if(argstr(0, path, MAXPATH) < 0)
+     return -1;
+ 
++  if(myproc()->trace_id==SYS_unlink){
++    printf("args:(%s), ",path);
++  }
++
+   begin_op();
+   if((dp = nameiparent(path, name)) == 0){
+     end_op();
+@@ -314,6 +356,10 @@
+   if((n = argstr(0, path, MAXPATH)) < 0)
+     return -1;
+ 
++  if(myproc()->trace_id==SYS_open){
++    printf("args:(%s,%d),",path,omode);
++  }
++
+   begin_op();
+ 
+   if(omode & O_CREATE){
+@@ -381,6 +427,11 @@
+     end_op();
+     return -1;
+   }
++
++  if(myproc()->trace_id==SYS_mkdir){
++    printf("args: (%s), ",path);
++  }
++
+   iunlockput(ip);
+   end_op();
+   return 0;
+@@ -401,6 +452,11 @@
+     end_op();
+     return -1;
+   }
++
++  if(myproc()->trace_id==SYS_mknod){
++    printf("args:(%s,%d,%d), ",path,major,minor);
++  }
++
+   iunlockput(ip);
+   end_op();
+   return 0;
+@@ -418,6 +474,11 @@
+     end_op();
+     return -1;
+   }
++
++  if(myproc()->trace_id==SYS_chdir){
++    printf("args:(%s), ",path);
++  }
++
+   ilock(ip);
+   if(ip->type != T_DIR){
+     iunlockput(ip);
+@@ -442,6 +503,11 @@
+   if(argstr(0, path, MAXPATH) < 0) {
+     return -1;
+   }
++
++  if(myproc()->trace_id==SYS_exec){
++    printf("args: (%s,%p), ",path,uargv);
++  }
++
+   memset(argv, 0, sizeof(argv));
+   for(i=0;; i++){
+     if(i >= NELEM(argv)){
+@@ -485,6 +551,11 @@
+   argaddr(0, &fdarray);
+   if(pipealloc(&rf, &wf) < 0)
+     return -1;
++  
++  if(myproc()->trace_id==SYS_pipe){
++    printf("args: (%p), ",fdarray);
++  }
++
+   fd0 = -1;
+   if((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0){
+     if(fd0 >= 0)
+diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
+--- a/kernel/sysproc.c	2023-07-03 21:05:13
++++ b/kernel/sysproc.c	2023-07-04 21:29:00
+@@ -5,12 +5,18 @@
+ #include "memlayout.h"
+ #include "spinlock.h"
+ #include "proc.h"
++#include "syscall.h"
+ 
+ uint64
+ sys_exit(void)
+ {
+   int n;
+   argint(0, &n);
++
++  if(myproc()->trace_id==SYS_exit){
++    printf("args:(%d), ",n);
++  }
++
+   exit(n);
+   return 0;  // not reached
+ }
+@@ -18,12 +24,18 @@
+ uint64
+ sys_getpid(void)
+ {
++  if(myproc()->trace_id==SYS_getpid){
++    printf("args:(), ");
++  }
+   return myproc()->pid;
+ }
+ 
+ uint64
+ sys_fork(void)
+ {
++  if(myproc()->trace_id==SYS_fork){
++    printf("args:(), ");
++  }
+   return fork();
+ }
+ 
+@@ -32,6 +44,11 @@
+ {
+   uint64 p;
+   argaddr(0, &p);
++
++  if(myproc()->trace_id==SYS_wait){
++    printf("args:(%p), ",p);
++  }
++
+   return wait(p);
+ }
+ 
+@@ -42,6 +59,11 @@
+   int n;
+ 
+   argint(0, &n);
++
++  if(myproc()->trace_id==SYS_sbrk){
++    printf("args:(%d), ",n);
++  }
++
+   addr = myproc()->sz;
+   if(growproc(n) < 0)
+     return -1;
+@@ -55,6 +77,11 @@
+   uint ticks0;
+ 
+   argint(0, &n);
++
++  if(myproc()->trace_id==SYS_sleep){
++    printf("args:(%d), ",n);
++  }
++
+   acquire(&tickslock);
+   ticks0 = ticks;
+   while(ticks - ticks0 < n){
+@@ -74,9 +101,26 @@
+   int pid;
+ 
+   argint(0, &pid);
++
++  if(myproc()->trace_id==SYS_kill){
++    printf("args:(%d), ",pid);
++  }
++
+   return kill(pid);
+ }
+ 
++uint64
++sys_trace(void)
++{
++  int pid;
++
++  argint(0,&pid);
++  if(myproc()->trace_id==SYS_trace){
++    printf("args: (%d), ",myproc()->trace_id);
++  }
++  return trace(pid);
++}
++
+ // return how many clock tick interrupts have occurred
+ // since start.
+ uint64
+@@ -87,5 +131,10 @@
+   acquire(&tickslock);
+   xticks = ticks;
+   release(&tickslock);
++
++  if(myproc()->trace_id==SYS_uptime){
++    printf("args:(), ");
++  }
++
+   return xticks;
+ }
+diff --color -u -urN a/user/trace.c b/user/trace.c
+--- a/user/trace.c	1970-01-01 06:00:00
++++ b/user/trace.c	2023-07-04 06:12:39
+@@ -0,0 +1,27 @@
++#include "kernel/param.h"
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int
++main(int argc,char *argv[])
++{
++  int i;
++  char *nargv[MAXARG];
++
++  if(argc < 3 || (argv[1][0] < '0' || argv[1][0] > '9')){
++    fprintf(2, "Usage: %s sys_call_num command\n", argv[0]);
++    exit(1);
++  }
++
++  if (trace(atoi(argv[1])) < 0) {
++    fprintf(2, "%s: trace failed\n", argv[0]);
++    exit(1);
++  }
++  
++  for(i = 2; i < argc && i < MAXARG; i++){
++    nargv[i-2] = argv[i];
++  }
++  exec(nargv[0], nargv);
++  exit(0);
++}
+\ No newline at end of file
+diff --color -u -urN a/user/user.h b/user/user.h
+--- a/user/user.h	2023-07-03 21:05:13
++++ b/user/user.h	2023-07-04 06:13:32
+@@ -22,6 +22,7 @@
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int trace(int);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --color -u -urN a/user/usys.pl b/user/usys.pl
+--- a/user/usys.pl	2023-07-03 21:05:13
++++ b/user/usys.pl	2023-07-04 06:14:41
+@@ -36,3 +36,4 @@
+ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
++entry("trace");

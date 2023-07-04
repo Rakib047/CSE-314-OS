@@ -16,7 +16,7 @@ if [ $# -ge 5 ]; then
         verbose=true
     fi
 
-    if [ $# -ge 6 ] && [ "$6" == "-nonexecute" ]; then
+    if [ $# -ge 6 ] && [ "$6" == "-noexecute" ]; then
         execute=false
     fi
 fi
