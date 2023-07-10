@@ -1,13 +1,14 @@
 Binary files a/.DS_Store and b/.DS_Store differ
 diff --color -u -urN a/Makefile b/Makefile
 --- a/Makefile	2023-07-03 21:05:13
-+++ b/Makefile	2023-07-04 00:49:08
-@@ -132,7 +132,8 @@
++++ b/Makefile	2023-07-08 22:08:42
+@@ -132,7 +132,9 @@
  	$U/_grind\
  	$U/_wc\
  	$U/_zombie\
 -
 +	$U/_trace\
++	$U/_history\
 +	
  fs.img: mkfs/mkfs README $(UPROGS)
  	mkfs/mkfs fs.img README $(UPROGS)
@@ -62,7 +63,7 @@ diff --color -u -urN a/kernel/kalloc.c b/kernel/kalloc.c
 +}
 diff --color -u -urN a/kernel/proc.c b/kernel/proc.c
 --- a/kernel/proc.c	2023-07-03 21:05:13
-+++ b/kernel/proc.c	2023-07-04 01:12:35
++++ b/kernel/proc.c	2023-07-06 21:08:24
 @@ -168,6 +168,7 @@
    p->chan = 0;
    p->killed = 0;
@@ -71,7 +72,16 @@ diff --color -u -urN a/kernel/proc.c b/kernel/proc.c
    p->state = UNUSED;
  }
  
-@@ -602,6 +603,36 @@
+@@ -381,6 +382,8 @@
+   release(&wait_lock);
+ 
+   // Jump into the scheduler, never to return.
++
++  p->trace_id-=1;
+   sched();
+   panic("zombie exit");
+ }
+@@ -602,6 +605,36 @@
    }
    return -1;
  }
@@ -110,32 +120,36 @@ diff --color -u -urN a/kernel/proc.c b/kernel/proc.c
  setkilled(struct proc *p)
 diff --color -u -urN a/kernel/proc.h b/kernel/proc.h
 --- a/kernel/proc.h	2023-07-03 21:05:13
-+++ b/kernel/proc.h	2023-07-04 01:19:46
++++ b/kernel/proc.h	2023-07-08 22:18:20
 @@ -91,7 +91,7 @@
    int killed;                  // If non-zero, have been killed
    int xstate;                  // Exit status to be returned to parent's wait
    int pid;                     // Process ID
 -
-+  int trace_id;                //Trace ID
++  int trace_id;                //Trace ID`
    // wait_lock must be held when using this:
    struct proc *parent;         // Parent process
  
 diff --color -u -urN a/kernel/syscall.c b/kernel/syscall.c
 --- a/kernel/syscall.c	2023-07-03 21:05:13
-+++ b/kernel/syscall.c	2023-07-04 21:40:11
-@@ -101,6 +101,7 @@
++++ b/kernel/syscall.c	2023-07-06 23:27:45
+@@ -101,6 +101,9 @@
  extern uint64 sys_link(void);
  extern uint64 sys_mkdir(void);
  extern uint64 sys_close(void);
 +extern uint64 sys_trace(void);
++extern uint64 sys_history(void);
++extern uint64 sys_historyutil(void);
  
  // An array mapping syscall numbers from syscall.h
  // to the function that handles the system call.
-@@ -126,8 +127,34 @@
+@@ -126,8 +129,40 @@
  [SYS_link]    sys_link,
  [SYS_mkdir]   sys_mkdir,
  [SYS_close]   sys_close,
 +[SYS_trace]   sys_trace,
++[SYS_history] sys_history,
++[SYS_historyutil] sys_historyutil,
  };
  
 +char *syscallnames[] = {
@@ -161,22 +175,38 @@ diff --color -u -urN a/kernel/syscall.c b/kernel/syscall.c
 +[SYS_mkdir]   "mkdir",
 +[SYS_close]   "close",
 +[SYS_trace]   "trace",
++[SYS_history] "history",
 + };
++
++int syscallcount[23]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
++int syscalltime[23]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 +
  void
  syscall(void)
  {
-@@ -138,7 +165,16 @@
+@@ -138,7 +173,28 @@
    if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
      // Use num to lookup the system call function for num, call it,
      // and store its return value in p->trapframe->a0
 +    if(num==p->trace_id){
++      acquire(&p->lock);
 +      printf("pid: %d, syscall: %s,", p->pid, syscallnames[num]);
-+    }
++      release(&p->lock);
++    }   
 +
++    uint64 begin,end;  
++
++    begin=syscalls[SYS_uptime]();
      p->trapframe->a0 = syscalls[num]();
++    end=syscalls[SYS_uptime]();
++
++    syscalltime[num-1]+=(end-begin);
++    syscallcount[num-1]++;
 +
 +    if(num==p->trace_id){
++      if(p->trace_id==SYS_history){
++        p->trace_id=-1; //print only once(trace result) for history command
++      }
 +      printf("return: %d\n",p->trapframe->a0);
 +    }
 +    
@@ -185,12 +215,14 @@ diff --color -u -urN a/kernel/syscall.c b/kernel/syscall.c
              p->pid, p->name, num);
 diff --color -u -urN a/kernel/syscall.h b/kernel/syscall.h
 --- a/kernel/syscall.h	2023-07-03 21:05:13
-+++ b/kernel/syscall.h	2023-07-04 06:06:01
-@@ -20,3 +20,4 @@
++++ b/kernel/syscall.h	2023-07-06 23:28:33
+@@ -20,3 +20,6 @@
  #define SYS_link   19
  #define SYS_mkdir  20
  #define SYS_close  21
 +#define SYS_trace  22
++#define SYS_history 23
++#define SYS_historyutil 24
 diff --color -u -urN a/kernel/sysfile.c b/kernel/sysfile.c
 --- a/kernel/sysfile.c	2023-07-03 21:05:13
 +++ b/kernel/sysfile.c	2023-07-04 20:33:23
@@ -365,13 +397,18 @@ diff --color -u -urN a/kernel/sysfile.c b/kernel/sysfile.c
      if(fd0 >= 0)
 diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
 --- a/kernel/sysproc.c	2023-07-03 21:05:13
-+++ b/kernel/sysproc.c	2023-07-04 21:29:00
-@@ -5,12 +5,18 @@
++++ b/kernel/sysproc.c	2023-07-09 00:53:27
+@@ -5,12 +5,23 @@
  #include "memlayout.h"
  #include "spinlock.h"
  #include "proc.h"
 +#include "syscall.h"
  
++extern char *syscallnames[];
++extern int syscallcount[23];
++extern int syscalltime[23];
++uint64 state;
++
  uint64
  sys_exit(void)
  {
@@ -385,7 +422,7 @@ diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
    exit(n);
    return 0;  // not reached
  }
-@@ -18,12 +24,18 @@
+@@ -18,12 +29,18 @@
  uint64
  sys_getpid(void)
  {
@@ -404,7 +441,7 @@ diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
    return fork();
  }
  
-@@ -32,6 +44,11 @@
+@@ -32,6 +49,11 @@
  {
    uint64 p;
    argaddr(0, &p);
@@ -416,7 +453,7 @@ diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
    return wait(p);
  }
  
-@@ -42,6 +59,11 @@
+@@ -42,6 +64,11 @@
    int n;
  
    argint(0, &n);
@@ -428,7 +465,7 @@ diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
    addr = myproc()->sz;
    if(growproc(n) < 0)
      return -1;
-@@ -55,6 +77,11 @@
+@@ -55,6 +82,11 @@
    uint ticks0;
  
    argint(0, &n);
@@ -440,7 +477,7 @@ diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
    acquire(&tickslock);
    ticks0 = ticks;
    while(ticks - ticks0 < n){
-@@ -74,9 +101,26 @@
+@@ -74,9 +106,27 @@
    int pid;
  
    argint(0, &pid);
@@ -464,10 +501,11 @@ diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
 +  return trace(pid);
 +}
 +
++
  // return how many clock tick interrupts have occurred
  // since start.
  uint64
-@@ -87,5 +131,10 @@
+@@ -87,5 +137,47 @@
    acquire(&tickslock);
    xticks = ticks;
    release(&tickslock);
@@ -477,7 +515,101 @@ diff --color -u -urN a/kernel/sysproc.c b/kernel/sysproc.c
 +  }
 +
    return xticks;
++}
++
++uint64 
++sys_historyutil(void)
++{
++  argaddr(0,&state); //user pointer to struct syscall_state
++
++  return 0;
++}
++
++uint64
++sys_history(void)
++{
++  struct proc* p=myproc();
++
++  argaddr(0,&state); //user pointer to struct syscall_state
++
++  if(p->trace_id==SYS_history){
++    printf("args: (%p,%d), ",state,p->trace_id);
++  }
++
++  argaddr(0,&state);
++
++  int syscallno;
++  argint(1,&syscallno);
++
++  struct syscall_state r;
++
++   strncpy((&r)->syscallname, syscallnames[syscallno], sizeof((&r)->syscallname)-1);
++   (&r)->callcount = syscallcount[syscallno-1];
++   (&r)->time = syscalltime[syscallno-1];
++
++   if(copyout(p->pagetable, state, (char *)&r, sizeof(r)) < 0){ 
++        return -1;   //error in copying result to user-space
++   }
++   return 0;  
++
  }
+diff --color -u -urN a/kernel/types.h b/kernel/types.h
+--- a/kernel/types.h	2023-07-03 21:05:13
++++ b/kernel/types.h	2023-07-08 22:52:52
+@@ -8,3 +8,10 @@
+ typedef unsigned long uint64;
+ 
+ typedef uint64 pde_t;
++
++//for history
++struct syscall_state{
++    char syscallname[16];
++    int callcount;
++    int time;
++};
+\ No newline at end of file
+diff --color -u -urN a/user/history.c b/user/history.c
+--- a/user/history.c	1970-01-01 06:00:00
++++ b/user/history.c	2023-07-10 18:51:33
+@@ -0,0 +1,37 @@
++#include "kernel/param.h"
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main(int argc,char *argv[]){
++    if(argc<1||argc>2||(!strcmp(argv[1], "") && (argv[1][0] < '0' || argv[1][0] > '9'))){
++        fprintf(2, "Usage: %s sys_call_num\n", argv[0]);
++        exit(1);
++    }
++    else if(argc==1){
++        for(int i=1;i<=23;i++){
++            struct syscall_state* ss = malloc(sizeof(struct syscall_state));
++
++            if(history(ss,i)<0){
++                fprintf(2,"%s:history failed\n",argv[0]);
++                exit(1);
++            }
++
++            printf("%d:\tsyscall: %s, #: %d, time: %d\n", i, ss->syscallname, ss->callcount,ss->time);
++            free(ss);
++        }
++
++    }
++     else{
++        struct syscall_state* ss = (struct syscall_state*) malloc(sizeof(struct syscall_state));
++    
++        if ( history(ss, atoi(argv[1])) < 0) {
++            fprintf(2, "%s: history failed\n", argv[0]);
++            exit(1);
++        }
++
++        printf("%d:\tsyscall: %s, #: %d, time: %d\n", atoi(argv[1]), ss->syscallname, ss->callcount,ss->time);
++        free(ss);
++    }
++    exit(0);
++}
+\ No newline at end of file
 diff --color -u -urN a/user/trace.c b/user/trace.c
 --- a/user/trace.c	1970-01-01 06:00:00
 +++ b/user/trace.c	2023-07-04 06:12:39
@@ -512,20 +644,35 @@ diff --color -u -urN a/user/trace.c b/user/trace.c
 \ No newline at end of file
 diff --color -u -urN a/user/user.h b/user/user.h
 --- a/user/user.h	2023-07-03 21:05:13
-+++ b/user/user.h	2023-07-04 06:13:32
-@@ -22,6 +22,7 @@
++++ b/user/user.h	2023-07-09 00:57:59
+@@ -1,4 +1,5 @@
+ struct stat;
++struct syscall_state;
+ 
+ // system calls
+ int fork(void);
+@@ -22,6 +23,9 @@
  char* sbrk(int);
  int sleep(int);
  int uptime(void);
 +int trace(int);
++int history(struct syscall_state*,int);
++int historyutil(struct syscall_state*);
  
  // ulib.c
  int stat(const char*, struct stat*);
+@@ -39,3 +43,4 @@
+ int atoi(const char*);
+ int memcmp(const void *, const void *, uint);
+ void *memcpy(void *, const void *, uint);
++
 diff --color -u -urN a/user/usys.pl b/user/usys.pl
 --- a/user/usys.pl	2023-07-03 21:05:13
-+++ b/user/usys.pl	2023-07-04 06:14:41
-@@ -36,3 +36,4 @@
++++ b/user/usys.pl	2023-07-07 02:39:11
+@@ -36,3 +36,6 @@
  entry("sbrk");
  entry("sleep");
  entry("uptime");
 +entry("trace");
++entry("history");
++entry("historyutil");
