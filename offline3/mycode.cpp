@@ -38,6 +38,7 @@ default_random_engine generateRandom(SEED);
 //semaphores
 pthread_mutex_t mutaxLock;
 vector<sem_t> printingSemaphore(100);
+sem_t bindingSemaphore;
 long long int startTime;
 
 
@@ -68,11 +69,12 @@ void initializeAll(int studentCount,int w,int x,int y){
         }
     }
 
-    //semaphore 
+    //semaphore init
     pthread_mutex_init(&mutaxLock,0);
     for(int i=0;i<studentCount;i++){
         sem_init(&printingSemaphore[i],0,0);
     }
+    sem_init(&bindingSemaphore,0,2);
 
     startTime=time(NULL);
 }
@@ -129,6 +131,25 @@ void* studentActivities(void* arg){
     endPrinting(studentId);
 
     cout<<"Student "<<studentId+1 <<" has finished printing at time "<<time(NULL)-startTime<<endl;
+
+    //TASK 2:BINDING
+    if(allStudents[studentId].leader){
+        //wait to finish printing of all the other members of group
+        int memberCount=studentPerGroup-1;
+        for(int i=studentId-1;memberCount!=0;i--){
+            pthread_join(allStudents[i].th,NULL);
+            memberCount--;
+        }
+
+        cout << "Group " << studentId / studentPerGroup + 1 << " has finished printing at time " << time(NULL) - startTime << endl;
+        
+        //binding
+        sem_wait(&bindingSemaphore);
+        cout<<"Group "<<studentId/studentPerGroup+1<<" has started binding at time "<<time(NULL)-startTime<<endl;
+        sleep(allStudents[studentId].bindingTime);
+        sem_post(&bindingSemaphore);
+        cout<<"Group "<<studentId/studentPerGroup+1<<" has finished binding at time "<<time(NULL)-startTime<<endl;
+    }
 
 }
 
