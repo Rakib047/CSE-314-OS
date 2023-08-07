@@ -31,12 +31,28 @@ class student{
         }
 };
 
+class Staff{
+    public:
+        pthread_t th;
+        int stuffId;
+        int waitingTime;
+        int readingTime;
+
+        Staff(int stuffId){
+            this->stuffId=stuffId;
+        }
+};
+
 int totalStudent,studentPerGroup;
 vector<student>allStudents;
+vector<Staff>allStaffs;
+
 default_random_engine generateRandom(SEED);
+int submissionCount=0;
 
 //semaphores
 pthread_mutex_t mutaxLock;
+pthread_mutex_t entryBook;
 vector<sem_t> printingSemaphore(100);
 sem_t bindingSemaphore;
 long long int startTime;
@@ -45,12 +61,18 @@ long long int startTime;
 void* studentActivities(void* arg);
 
 void initializeAll(int studentCount,int w,int x,int y){
+    //initialize students & staffs 
     for(int i=0;i<studentCount;i++){
         student s(i);
         allStudents.push_back(s);
     }
+
+    for(int i=0;i<2;i++){
+        Staff stf(i);
+        allStaffs.push_back(stf);
+    }
     
-    //setting delays
+    //setting delays for students and staffs
     poisson_distribution<int>distribution1(3); //for arrival time unit
     poisson_distribution<int>distribution2(w); //for printing time unit
     poisson_distribution<int>distribution3(x); //for binding time unit
@@ -69,8 +91,19 @@ void initializeAll(int studentCount,int w,int x,int y){
         }
     }
 
+    //for staffs
+    int temp=2;
+    for(int i=0;i<2;i++){
+        allStaffs[i].waitingTime=temp;
+        allStaffs[i].readingTime=distribution4(generateRandom);
+        temp++;
+    }
+
+
     //semaphore init
     pthread_mutex_init(&mutaxLock,0);
+    pthread_mutex_init(&entryBook,0);
+
     for(int i=0;i<studentCount;i++){
         sem_init(&printingSemaphore[i],0,0);
     }
@@ -122,14 +155,18 @@ void printingStation(int studentId){
     //TASK 1:PRINTING
     sleep(allStudents[studentId].arrivalTime);
 
+    pthread_mutex_lock(&mutaxLock);
     cout<<"Student "<<studentId+1<<" has arrived at print station at time "<<time(NULL)-startTime<<endl;
+    pthread_mutex_unlock(&mutaxLock);
 
     //printing task
     startPrinting(studentId);
     sleep(allStudents[studentId].printingTime);
     endPrinting(studentId);
 
+    pthread_mutex_lock(&mutaxLock);
     cout<<"Student "<<studentId+1 <<" has finished printing at time "<<time(NULL)-startTime<<endl;
+    pthread_mutex_unlock(&mutaxLock);
 }
 
 void bindingStation(int studentId){
@@ -142,8 +179,10 @@ void bindingStation(int studentId){
             memberCount--;
         }
 
+        pthread_mutex_lock(&mutaxLock);
         cout << "Group " << studentId / studentPerGroup + 1 << " has finished printing at time " << time(NULL) - startTime << endl;
-        
+        pthread_mutex_unlock(&mutaxLock);
+
         //binding
         sem_wait(&bindingSemaphore);
         cout<<"Group "<<studentId/studentPerGroup+1<<" has started binding at time "<<time(NULL)-startTime<<endl;
@@ -153,13 +192,59 @@ void bindingStation(int studentId){
     }
 }
 
+void writeToEntryBook(int studentId){
+    if(allStudents[studentId].leader){
+        pthread_mutex_lock(&entryBook);
+
+        pthread_mutex_lock(&mutaxLock);
+        cout << "Group " << studentId/studentPerGroup + 1 << " has started writing the report at time " << time(NULL) - startTime << endl;
+        pthread_mutex_unlock(&mutaxLock);
+
+        sleep(allStudents[studentId].writingTime);
+
+        pthread_mutex_lock(&mutaxLock);
+		cout << "Group " << studentId /studentPerGroup + 1 << " has submitted the report at time " << time(NULL) - startTime << endl;
+        pthread_mutex_unlock(&mutaxLock);
+
+        pthread_mutex_lock(&mutaxLock);
+        submissionCount++;
+        pthread_mutex_unlock(&mutaxLock);
+
+        pthread_mutex_unlock(&entryBook);
+    }
+}
+
 void* studentActivities(void* arg){
     int studentId=*(int*)arg; //random order
+
 
     printingStation(studentId);
 
     bindingStation(studentId);
 
+    writeToEntryBook(studentId);
+
+}
+
+void readEntryBook(int staffId){
+    sleep(allStaffs[staffId].waitingTime);
+    
+    pthread_mutex_lock(&mutaxLock);
+	cout << "Staff " << staffId + 1 << " has started reading the entry book at time " << time(NULL) - startTime << ". ";
+	cout << "No. of submissions = " << submissionCount << endl;
+    pthread_mutex_unlock(&mutaxLock);
+    
+	sleep(allStaffs[staffId].readingTime);
+
+	allStaffs[staffId].waitingTime = rand() % 7 + 1;
+
+}
+
+void *staffActivities(void* arg){
+    while(1){
+        int staffId=*(int*)arg;
+        readEntryBook(staffId);
+    }
 }
 
 
@@ -181,6 +266,12 @@ int main(){
     for(int i=0;i<totalStudent;i++){
         pthread_create(&(allStudents[randomSerial[i]].th),NULL,studentActivities,(void*)&randomSerial[i]);
     }
+
+    
+    for(int i=0;i<2;i++){
+        pthread_create(&allStaffs[i].th, NULL, staffActivities, (void *)&allStaffs[i].stuffId);
+    }
+
 
     for (int i = 0; i < totalStudent; i++){
 	    if (allStudents[i].leader)
