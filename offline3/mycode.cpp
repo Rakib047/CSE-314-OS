@@ -118,9 +118,8 @@ void endPrinting(int studentId){
     pthread_mutex_unlock(&mutaxLock);
 }
 
-void* studentActivities(void* arg){
-    int studentId=*(int*)arg; //random order
-
+void printingStation(int studentId){
+    //TASK 1:PRINTING
     sleep(allStudents[studentId].arrivalTime);
 
     cout<<"Student "<<studentId+1<<" has arrived at print station at time "<<time(NULL)-startTime<<endl;
@@ -131,7 +130,9 @@ void* studentActivities(void* arg){
     endPrinting(studentId);
 
     cout<<"Student "<<studentId+1 <<" has finished printing at time "<<time(NULL)-startTime<<endl;
+}
 
+void bindingStation(int studentId){
     //TASK 2:BINDING
     if(allStudents[studentId].leader){
         //wait to finish printing of all the other members of group
@@ -150,6 +151,14 @@ void* studentActivities(void* arg){
         sem_post(&bindingSemaphore);
         cout<<"Group "<<studentId/studentPerGroup+1<<" has finished binding at time "<<time(NULL)-startTime<<endl;
     }
+}
+
+void* studentActivities(void* arg){
+    int studentId=*(int*)arg; //random order
+
+    printingStation(studentId);
+
+    bindingStation(studentId);
 
 }
 
